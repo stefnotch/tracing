@@ -8,7 +8,7 @@ use crate::{
 use std::fmt;
 use tracing_core::{
     field::{self, Field},
-    Collect, Event, Level,
+    Collect, Event,
 };
 
 #[cfg(feature = "tracing-log")]
@@ -106,7 +106,6 @@ pub struct Pretty {
 pub struct PrettyVisitor<'a> {
     writer: Writer<'a>,
     is_empty: bool,
-    style: Style,
     result: fmt::Result,
 }
 
@@ -139,16 +138,6 @@ impl Default for Pretty {
 }
 
 impl Pretty {
-    fn style_for(level: &Level) -> Style {
-        match *level {
-            Level::TRACE => Style::new().purple(),
-            Level::DEBUG => Style::new().blue(),
-            Level::INFO => Style::new().green(),
-            Level::WARN => Style::new().yellow(),
-            Level::ERROR => Style::new().red(),
-        }
-    }
-
     /// Sets whether the event's source code location is displayed.
     ///
     /// This defaults to `true`.
@@ -186,10 +175,10 @@ where
 
         self.format_timestamp(&mut writer)?;
 
-        let style = if self.display_level && writer.has_ansi_escapes() {
-            Pretty::style_for(meta.level())
+        let style = if self.display_level {
+            writer.style.level_color(meta.level())
         } else {
-            Style::new()
+            writer.style
         };
 
         if self.display_level {
@@ -197,15 +186,10 @@ where
         }
 
         if self.display_target {
-            let target_style = if writer.has_ansi_escapes() {
-                style.bold()
-            } else {
-                style
-            };
             write!(
                 writer,
                 "{}{}",
-                target_style.paint(meta.target()),
+                style.bold().paint(meta.target()),
                 style.paint(":")
             )?;
         }
@@ -228,16 +212,12 @@ where
 
         writer.write_char(' ')?;
 
-        let mut v = PrettyVisitor::new(writer.by_ref(), true).with_style(style);
+        let mut v = PrettyVisitor::new(writer.by_styled_ref(style), true);
         event.record(&mut v);
         v.finish()?;
         writer.write_char('\n')?;
 
-        let dimmed_italic = if writer.has_ansi_escapes() {
-            Style::new().dimmed().italic()
-        } else {
-            Style::new()
-        };
+        let dimmed_italic = writer.style.dimmed().italic();
         let thread = self.display_thread_name || self.display_thread_id;
 
         if let (Some(file), true, true) = (
@@ -272,7 +252,7 @@ where
             writer.write_char('\n')?;
         }
 
-        let bold = writer.bold();
+        let bold = writer.style.bold();
         let span = event
             .parent()
             .and_then(|id| ctx.span(id))
@@ -388,13 +368,12 @@ impl<'a> PrettyVisitor<'a> {
         Self {
             writer,
             is_empty,
-            style: Style::default(),
             result: Ok(()),
         }
     }
 
-    pub(crate) fn with_style(self, style: Style) -> Self {
-        Self { style, ..self }
+    fn style(&self) -> Style {
+        self.writer.style
     }
 
     #[must_use]
@@ -403,29 +382,13 @@ impl<'a> PrettyVisitor<'a> {
             self.is_empty = false;
             Ok(())
         } else {
-            write!(self.writer, "{}", self.style.paint(", "))
-        }
-    }
-
-    fn style(&self) -> Style {
-        if self.writer.has_ansi_escapes() {
-            self.style
-        } else {
-            Style::new()
-        }
-    }
-
-    fn bold_style(&self) -> Style {
-        if self.writer.has_ansi_escapes() {
-            self.style.bold()
-        } else {
-            self.style
+            write!(self.writer, "{}", self.writer.style.paint(", "))
         }
     }
 
     #[must_use]
     fn record_debug_impl(&mut self, field: &Field, styled_value: &dyn fmt::Debug) -> fmt::Result {
-        let bold = self.bold_style();
+        let bold = self.style().bold();
         match field.name() {
             "message" => {
                 self.write_padding()?;
@@ -478,7 +441,7 @@ impl<'a> field::Visit for PrettyVisitor<'a> {
 
         let style = self.style();
         self.result = if let Some(source) = value.source() {
-            let bold = self.bold_style();
+            let bold = style.bold();
             self.record_debug_impl(
                 field,
                 &format_args!(

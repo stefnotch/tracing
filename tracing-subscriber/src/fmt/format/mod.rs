@@ -45,8 +45,8 @@ use tracing_core::{
 #[cfg(feature = "tracing-log")]
 use tracing_log::NormalizeEvent;
 
-#[cfg(feature = "ansi")]
-use owo_colors::{Style, Styled};
+mod style;
+use style::{Style, StylePainter};
 
 #[cfg(feature = "json")]
 mod json;
@@ -311,7 +311,7 @@ where
 pub struct Writer<'writer> {
     writer: &'writer mut dyn fmt::Write,
     // TODO(eliza): add ANSI support
-    is_ansi: bool,
+    style: Style,
 }
 
 /// A [`FormatFields`] implementation that formats fields by calling a function
@@ -437,13 +437,16 @@ impl<'writer> Writer<'writer> {
     pub fn new(writer: &'writer mut impl fmt::Write) -> Self {
         Self {
             writer: writer as &mut dyn fmt::Write,
-            is_ansi: false,
+            style: Style::new(false),
         }
     }
 
     // TODO(eliza): consider making this a public API?
     pub(crate) fn with_ansi(self, is_ansi: bool) -> Self {
-        Self { is_ansi, ..self }
+        Self {
+            style: self.style.with_ansi(is_ansi),
+            ..self
+        }
     }
 
     /// Return a new `Writer` that mutably borrows `self`.
@@ -452,10 +455,17 @@ impl<'writer> Writer<'writer> {
     /// to a function that takes a `Writer` by value, allowing the original writer
     /// to still be used once that function returns.
     pub fn by_ref(&mut self) -> Writer<'_> {
-        let is_ansi = self.is_ansi;
+        let style = self.style;
         Writer {
             writer: self as &mut dyn fmt::Write,
-            is_ansi,
+            style,
+        }
+    }
+
+    pub(in crate::fmt::format) fn by_styled_ref(&mut self, style: Style) -> Writer<'_> {
+        Writer {
+            writer: self as &mut dyn fmt::Write,
+            style,
         }
     }
 
@@ -525,40 +535,7 @@ impl<'writer> Writer<'writer> {
     ///
     /// [ANSI escape codes]: https://en.wikipedia.org/wiki/ANSI_escape_code
     pub fn has_ansi_escapes(&self) -> bool {
-        self.is_ansi
-    }
-
-    pub(in crate::fmt::format) fn bold(&self) -> Style {
-        #[cfg(feature = "ansi")]
-        {
-            if self.is_ansi {
-                return Style::new().bold();
-            }
-        }
-
-        Style::new()
-    }
-
-    pub(in crate::fmt::format) fn dimmed(&self) -> Style {
-        #[cfg(feature = "ansi")]
-        {
-            if self.is_ansi {
-                return Style::new().dimmed();
-            }
-        }
-
-        Style::new()
-    }
-
-    pub(in crate::fmt::format) fn italic(&self) -> Style {
-        #[cfg(feature = "ansi")]
-        {
-            if self.is_ansi {
-                return Style::new().italic();
-            }
-        }
-
-        Style::new()
+        self.style.is_ansi()
     }
 }
 
@@ -583,7 +560,7 @@ impl fmt::Debug for Writer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Writer")
             .field("writer", &format_args!("<&mut dyn fmt::Write>"))
-            .field("is_ansi", &self.is_ansi)
+            .field("style", &self.style)
             .finish()
     }
 }
@@ -851,7 +828,7 @@ impl<F, T> Format<F, T> {
             return Ok(());
         }
 
-        let dimmed = writer.dimmed();
+        let dimmed = writer.style.dimmed();
         write!(writer, "{} ", dimmed.paint(FormatTimeDisplay(&self.timer)))
     }
 }
@@ -945,10 +922,10 @@ where
             write!(writer, "{:0>2?} ", std::thread::current().id())?;
         }
 
-        let dimmed = writer.dimmed();
+        let dimmed = writer.style.dimmed();
 
         if let Some(scope) = ctx.event_scope() {
-            let bold = writer.bold();
+            let bold = writer.style.bold();
 
             let mut seen = false;
 
@@ -1051,7 +1028,7 @@ where
             write!(writer, "{:0>2?} ", std::thread::current().id())?;
         }
 
-        let dimmed = writer.dimmed();
+        let dimmed = writer.style.dimmed();
         if self.display_target {
             write!(
                 writer,
@@ -1185,7 +1162,7 @@ impl<'a> field::Visit for DefaultVisitor<'a> {
 
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         if let Some(source) = value.source() {
-            let italic = self.writer.italic();
+            let italic = self.writer.style.italic();
             self.record_debug(
                 field,
                 &format_args!(
@@ -1193,7 +1170,7 @@ impl<'a> field::Visit for DefaultVisitor<'a> {
                     value,
                     italic.paint(field.name()),
                     italic.paint(".sources"),
-                    self.writer.dimmed().paint("="),
+                    self.writer.style.dimmed().paint("="),
                     ErrorSourceList(source)
                 ),
             )
@@ -1216,15 +1193,15 @@ impl<'a> field::Visit for DefaultVisitor<'a> {
             name if name.starts_with("r#") => write!(
                 self.writer,
                 "{}{}{:?}",
-                self.writer.italic().paint(&name[2..]),
-                self.writer.dimmed().paint("="),
+                self.writer.style.italic().paint(&name[2..]),
+                self.writer.style.dimmed().paint("="),
                 value
             ),
             name => write!(
                 self.writer,
                 "{}{}{:?}",
-                self.writer.italic().paint(name),
-                self.writer.dimmed().paint("="),
+                self.writer.style.italic().paint(name),
+                self.writer.style.dimmed().paint("="),
                 value
             ),
         };
@@ -1255,76 +1232,6 @@ impl<'a> Display for ErrorSourceList<'a> {
             curr = curr_err.source();
         }
         list.finish()
-    }
-}
-
-trait StylePainter {
-    fn paint<T>(&self, d: T) -> Styled<T>;
-}
-
-#[cfg(not(feature = "ansi"))]
-#[derive(Copy, Clone)]
-struct Style;
-
-#[cfg(not(feature = "ansi"))]
-impl Style {
-    fn new() -> Self {
-        Style
-    }
-
-    fn bold(self) -> Self {
-        self
-    }
-
-    fn dimmed(self) -> Self {
-        self
-    }
-
-    fn italic(self) -> Self {
-        self
-    }
-}
-#[cfg(not(feature = "ansi"))]
-impl StylePainter for Style {
-    fn paint<T>(&self, d: T) -> Styled<T> {
-        Styled { target: d }
-    }
-}
-
-#[cfg(not(feature = "ansi"))]
-struct Styled<T> {
-    target: T,
-}
-
-#[cfg(not(feature = "ansi"))]
-macro_rules! impl_fmt {
-    ($($trait:path),* $(,)?) => {
-        $(
-            impl<T: $trait> $trait for Styled<T> {
-                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    <T as $trait>::fmt(&self.target, f)
-                }
-            }
-        )*
-    };
-}
-#[cfg(not(feature = "ansi"))]
-impl_fmt! {
-    fmt::Display,
-    fmt::Debug,
-    fmt::UpperHex,
-    fmt::LowerHex,
-    fmt::Binary,
-    fmt::UpperExp,
-    fmt::LowerExp,
-    fmt::Octal,
-    fmt::Pointer,
-}
-
-#[cfg(feature = "ansi")]
-impl StylePainter for Style {
-    fn paint<T>(&self, d: T) -> Styled<T> {
-        self.style(d)
     }
 }
 
@@ -1431,15 +1338,14 @@ impl<F: LevelNames> fmt::Display for FmtLevel<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         #[cfg(feature = "ansi")]
         {
-            // Be careful about importing owo_colors::OwoColorize in a too large scope, since it adds methods to every type.
-            use owo_colors::OwoColorize;
+            let style = Style::new(self.ansi).level_color(&self.level);
             if self.ansi {
                 return match self.level {
-                    Level::TRACE => write!(f, "{}", F::TRACE_STR.purple()),
-                    Level::DEBUG => write!(f, "{}", F::DEBUG_STR.blue()),
-                    Level::INFO => write!(f, "{}", F::INFO_STR.green()),
-                    Level::WARN => write!(f, "{}", F::WARN_STR.yellow()),
-                    Level::ERROR => write!(f, "{}", F::ERROR_STR.red()),
+                    Level::TRACE => write!(f, "{}", style.paint(F::TRACE_STR)),
+                    Level::DEBUG => write!(f, "{}", style.paint(F::DEBUG_STR)),
+                    Level::INFO => write!(f, "{}", style.paint(F::INFO_STR)),
+                    Level::WARN => write!(f, "{}", style.paint(F::WARN_STR)),
+                    Level::ERROR => write!(f, "{}", style.paint(F::ERROR_STR)),
                 };
             }
         }
